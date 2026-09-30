@@ -128,7 +128,7 @@ configure() {
       OPTIONS="${OPTIONS} --enable-cross-compile --cross-prefix=${cross_prefix} --target-os=mingw32 --pkg-config=pkg-config"
       EXTRA_CFLAGS="-fno-tree-vectorize -D_WIN32_WINNT=0x0601 -DWINVER=0x0601 -gdwarf-5 -fno-omit-frame-pointer"
       EXTRA_CFLAGS="${EXTRA_CFLAGS} -I../../../thirdparty/64/include"
-      EXTRA_LDFLAGS="${EXTRA_LDFLAGS} -L../../../thirdparty/64/lib"
+      EXTRA_LDFLAGS="${EXTRA_LDFLAGS} -L../../../thirdparty/64/lib -Wl,-Bstatic -static-libgcc -static-libstdc++"
     fi
     PKG_CONFIG_PREFIX_DIR="--define-variable=prefix=../../../thirdparty/64"
   else
