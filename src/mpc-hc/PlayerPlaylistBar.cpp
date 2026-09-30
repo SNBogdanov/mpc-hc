@@ -240,6 +240,7 @@ void CPlayerPlaylistBar::LoadDuration(POSITION pos) {
                             int duration = std::stoi(info);
                             if (duration > 0) {
                                 pli.m_duration = duration * 10000LL;
+                                pli.m_bDurationTrusted = true;
                                 RefreshItem(pos);
                             }
                         } catch (...) {
@@ -250,6 +251,27 @@ void CPlayerPlaylistBar::LoadDuration(POSITION pos) {
             mi.Close();
         }
     }
+}
+
+REFERENCE_TIME CPlayerPlaylistBar::LoadCurDuration() {
+    POSITION pos = m_pl.GetPos();
+    if (!pos) {
+        return 0;
+    }
+    CPlaylistItem& pli = m_pl.GetAt(pos);
+    if (!AfxGetAppSettings().bUseMediainfoLoadFileDuration || pli.m_bDurationTrusted || pli.m_duration > 0) {
+        return pli.m_duration;
+    }
+    LoadDuration(pos);
+    return m_pl.GetAt(pos).m_duration;
+}
+
+REFERENCE_TIME CPlayerPlaylistBar::GetCurDuration() const {
+    POSITION pos = m_pl.GetPos();
+    if (!pos) {
+        return 0;
+    }
+    return m_pl.GetAt(pos).m_duration;
 }
 
 void CPlayerPlaylistBar::AddItem(CString fn, bool insertAtCurrent /*= false*/)
@@ -268,7 +290,6 @@ void CPlayerPlaylistBar::AddItem(CString fn, bool insertAtCurrent /*= false*/)
     } else {
         pos = m_pl.AddTail(pli);
     }
-    LoadDuration(pos);
 }
 
 void CPlayerPlaylistBar::AddItem(CString fn, CAtlList<CString>* subs)
@@ -325,11 +346,7 @@ void CPlayerPlaylistBar::AddItem(CAtlList<CString>& fns, CAtlList<CString>* subs
         pli.m_ydl_subs.AddTailList(ydl_subs);
     }
 
-    POSITION ipos = m_pl.AddTail(pli);
-
-    if (m_pl.GetCount() > 1) {
-        LoadDuration(ipos);
-    }
+    m_pl.AddTail(pli);
 }
 
 void CPlayerPlaylistBar::ReplaceCurrentItem(CAtlList<CString>& fns, CAtlList<CString>* subs, CString label, CString ydl_src, CString ydl_ua, CString cue, CAtlList<CYoutubeDLInstance::YDLSubInfo>* ydl_subs)
@@ -962,6 +979,7 @@ bool CPlayerPlaylistBar::ParseMPCPlayList(CString fn)
                 long long dur = _ttoll(value) * 10000LL;
                 if (dur > 0) {
                     pli[i].m_duration = dur;
+                    pli[i].m_bDurationTrusted = true;
                 }
             } else if (key == _T("video")) {
                 while (pli[i].m_fns.GetCount() < 2) {
@@ -1199,6 +1217,58 @@ bool CPlayerPlaylistBar::Empty()
     return bWasPlaying;
 }
 
+void CPlayerPlaylistBar::RemoveMissingFilesFromList()
+{
+    CWaitCursor wait;
+    CAutoLock pledit(&m_plEditLock);
+
+    POSITION pos = m_pl.GetHeadPosition();
+    while (pos) {
+        POSITION cur = pos;
+        m_pl.GetNext(pos);
+
+        CPlaylistItem& pli = m_pl.GetAt(cur);
+        if (pli.m_type == CPlaylistItem::file && !pli.m_fns.IsEmpty()) {
+            if (IsFileMissing(pli.m_fns.GetHead())) {
+                bool wasCurrent = m_pl.RemoveAt(cur);
+                if (wasCurrent) {
+                    m_pl.SetPos(pos ? pos : m_pl.GetHeadPosition());
+                }
+            }
+        }
+    }
+}
+
+bool CPlayerPlaylistBar::IsFileMissing(const CString& fn)
+{
+    CString path = fn;
+    if (path.IsEmpty() || PathUtils::IsURL(path)) {
+        return false;
+    }
+
+    int i = path.Find(_T(":\\"));
+    if (i <= 0 || path.Left(2) == _T("\\\\")) {
+        // relative/UNC paths or filenames without a drive root: their resolution
+        // depends on the working directory or on the network state, so do not drop them
+        return false;
+    }
+
+    // exchangeable or absent drives: opening later may still work (mounting, HDD sleep)
+    UINT type = GetDriveType(path.Left(i + 2));
+    if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_REMOVABLE || type == DRIVE_CDROM) {
+        return false;
+    }
+
+    if (GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+
+    // retry with a long-path prefix; GetFileAttributes rejects paths over MAX_PATH
+    CString lp = _T("\\\\?\\") + path;
+    lp.Replace(_T('/'), _T('\\'));
+    return GetFileAttributes(lp) == INVALID_FILE_ATTRIBUTES;
+}
+
 void CPlayerPlaylistBar::Open(CAtlList<CString>& fns, bool fMulti, CAtlList<CString>* subs, CString label, CString ydl_src, CString ydl_ua, CString cue)
 {
     Empty();
@@ -1228,6 +1298,7 @@ void CPlayerPlaylistBar::Append(CAtlList<CString>& fns, bool fMulti, CAtlList<CS
         ParsePlayList(fns, subs, 0, label, ydl_src, ydl_ua, cue, ydl_subs);
     }
 
+    //RemoveMissingFilesFromList(); // TODO: temporarily disabled
     Refresh();
     SavePlaylist(activateListItemIndex != 0);
 
@@ -1653,6 +1724,9 @@ void CPlayerPlaylistBar::SetCurTime(REFERENCE_TIME rt)
     POSITION pos = m_pl.GetPos();
     if (pos) {
         CPlaylistItem& pli = m_pl.GetAt(pos);
+        if (pli.m_bDurationTrusted) {
+            return;
+        }
         pli.m_duration = rt;
         RefreshItem(pos);
     }
@@ -1859,6 +1933,7 @@ void CPlayerPlaylistBar::LoadPlaylist(LPCTSTR filename)
         if (p.FileExists()) {
             if (s.bRememberPlaylistItems) {
                 ParseMPCPlayList(p);
+                //RemoveMissingFilesFromList(); // TODO: temporarily disabled
                 Refresh();
                 //this code checks for a saved position in a playlist that was active when the player was last closed
                 if (s.fKeepHistory && s.bRememberExternalPlaylistPos && !s.externalPlayListPath.IsEmpty()) { 

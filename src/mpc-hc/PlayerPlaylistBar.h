@@ -160,6 +160,8 @@ public:
     void SetHiddenDueToFullscreen(bool bHidenDueToFullscreen, bool returningFromFullScreen = false );
 
     void LoadDuration(POSITION pos);
+    REFERENCE_TIME LoadCurDuration();
+    REFERENCE_TIME GetCurDuration() const;
 
     CPlaylist m_pl;
 
@@ -187,6 +189,9 @@ public:
     void Refresh();
     void PlayListChanged();
     bool Empty();
+    void RemoveMissingFilesFromList();
+
+    static bool IsFileMissing(const CString& fn);
 
     void Open(CAtlList<CString>& fns, bool fMulti, CAtlList<CString>* subs = nullptr, CString label = _T(""), CString ydl_src = _T(""), CString ydl_ua = _T(""), CString cue = _T(""));
     void Append(CAtlList<CString>& fns, bool fMulti, CAtlList<CString>* subs = nullptr, CString label = _T(""), CString ydl_src = _T(""), CString ydl_ua = _T(""), CString cue = _T(""), CAtlList<CYoutubeDLInstance::YDLSubInfo>* ydl_subs = nullptr);

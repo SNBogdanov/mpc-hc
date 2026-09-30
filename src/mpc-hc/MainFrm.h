@@ -595,10 +595,14 @@ private:
     // while a holder is on the stack, these always run
     void OpenMediaInternal(CAutoPtr<OpenMediaData> pOMD);
     void CloseMediaInternal(bool bNextIsQueued = false, bool bPendingFileDelete = false);
+    void ShowOpenFailScanCursor();
+    void HideOpenFailScanCursor();
 
     bool m_bSettingUpMenus;
     volatile bool m_bOpenMediaActive;
     int m_OpenMediaFailedCount;
+    bool m_bOpenFailScanCursor;
+    HCURSOR m_hOpenFailScanPrevCursor;
 
     bool m_bTBDropdownActive;
 

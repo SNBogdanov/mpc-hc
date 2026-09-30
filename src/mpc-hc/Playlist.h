@@ -40,6 +40,7 @@ public:
     CAtlList<CString> m_subs;
     enum type_t { file, device } m_type;
     REFERENCE_TIME m_duration;
+    bool m_bDurationTrusted; // duration came from MediaInfo or a saved playlist, not from the playback graph
     ULONGLONG m_filetime; // file creation time; 0 = not checked yet, 1 = unavailable (missing file or URL)
     int inlineEditMaxWidth;
     int m_vinput, m_vchannel;

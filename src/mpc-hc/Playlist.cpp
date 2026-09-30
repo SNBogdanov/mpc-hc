@@ -36,6 +36,7 @@ CPlaylistItem::CPlaylistItem()
     , m_posPrevShuffle(nullptr)
     , m_type(file)
     , m_duration(0)
+    , m_bDurationTrusted(false)
     , m_filetime(0)
     , m_vinput(-1)
     , m_vchannel(-1)
@@ -79,6 +80,7 @@ CPlaylistItem& CPlaylistItem::operator=(const CPlaylistItem& pli)
         m_type = pli.m_type;
         m_fInvalid = pli.m_fInvalid;
         m_duration = pli.m_duration;
+        m_bDurationTrusted = pli.m_bDurationTrusted;
         m_filetime = pli.m_filetime;
         m_vinput = pli.m_vinput;
         m_vchannel = pli.m_vchannel;

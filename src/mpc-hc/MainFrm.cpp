@@ -871,6 +871,8 @@ CMainFrame::CMainFrame()
     , m_bSettingUpMenus(false)
     , m_bOpenMediaActive(false)
     , m_OpenMediaFailedCount(0)
+    , m_bOpenFailScanCursor(false)
+    , m_hOpenFailScanPrevCursor(nullptr)
     , m_fFullScreen(false)
     , m_bFullScreenWindowIsD3D(false)
     , m_bFullScreenWindowIsOnSeparateDisplay(false)
@@ -2417,6 +2419,12 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
                                 return;
                             }
                             m_pMS->GetDuration(&rtDur);
+
+                            // prefer the trusted duration (MediaInfo / saved playlist) for the
+                            // "total time" shown in the status bar and OSD
+                            if (REFERENCE_TIME rtTrusted = m_wndPlaylistBar.GetCurDuration()) {
+                                rtDur = rtTrusted;
+                            }
 
                             if ((abRepeat.positionA && rtNow < abRepeat.positionA || abRepeat.positionB && rtNow >= abRepeat.positionB) && GetMediaState() != State_Stopped) {
                                 PerformABRepeat();
@@ -4434,6 +4442,7 @@ LRESULT CMainFrame::OnFilePostOpenmedia(WPARAM wParam, LPARAM lParam)
     // from this on
     m_bOpenMediaActive = false;
     m_OpenMediaFailedCount = 0;
+    HideOpenFailScanCursor();
     m_bSettingUpMenus = true;
 
     SetLoadState(MLS::LOADED);
@@ -4656,10 +4665,41 @@ LRESULT CMainFrame::OnFilePostOpenmedia(WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+void CMainFrame::ShowOpenFailScanCursor()
+{
+    HCURSOR hWait = ::LoadCursor(nullptr, IDC_WAIT);
+    if (!hWait) {
+        return;
+    }
+    if (!m_bOpenFailScanCursor) {
+        m_bOpenFailScanCursor = true;
+        m_hOpenFailScanPrevCursor = ::SetCursor(hWait);
+    } else {
+        // the wait cursor is dropped by any WM_SETCURSOR along the way, so a
+        // scan that spans several messages has to re-assert it every time
+        ::SetCursor(hWait);
+    }
+}
+
+void CMainFrame::HideOpenFailScanCursor()
+{
+    if (m_bOpenFailScanCursor) {
+        m_bOpenFailScanCursor = false;
+        if (m_hOpenFailScanPrevCursor) {
+            ::SetCursor(m_hOpenFailScanPrevCursor);
+        }
+        m_hOpenFailScanPrevCursor = nullptr;
+    }
+}
+
 LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
 {
     ASSERT(GetLoadState() == MLS::LOADING);
     SetLoadState(MLS::FAILING);
+
+    // a run of missing files is a chain of separate failed opens; hold the wait
+    // cursor for the whole chain instead of only for the length of one message
+    ShowOpenFailScanCursor();
 
     ASSERT(GetCurrentThreadId() == AfxGetApp()->m_nThreadID);
     const auto& s = AfxGetAppSettings();
@@ -4698,7 +4738,7 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
     bool bAfterPlaybackEvent = false;
 
     m_bOpenMediaActive = false;
-    m_OpenMediaFailedCount++;
+    // m_OpenMediaFailedCount++;
 
     m_reloadFilename.Empty();
     m_rtReloadPos = -1;
@@ -4770,6 +4810,7 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
         // Open failed and we are not chaining to another file: reveal the status bar (if a
         // preset hides it) so the error message is visible, until the next media load.
         ShowStatusBarForMessage();
+        HideOpenFailScanCursor();
     }
 
     return 0;
@@ -4779,6 +4820,7 @@ void CMainFrame::OnFilePostClosemedia(bool bNextIsQueued/* = false*/)
 {
     SetPlaybackMode(PM_NONE);
     SetLoadState(MLS::CLOSED);
+    HideOpenFailScanCursor();
 
     abRepeat = ABRepeat();
     m_kfs.clear();
@@ -20788,6 +20830,9 @@ void CMainFrame::OpenCurPlaylistItem(REFERENCE_TIME rtStart, bool reopen /* = fa
             return;
         }
     }
+
+    // read the duration lazily, when the item actually becomes active (MediaInfo option, if enabled)
+    m_wndPlaylistBar.LoadCurDuration();
 
     CAutoPtr<OpenMediaData> p(m_wndPlaylistBar.GetCurOMD(rtStart, abRepeat));
     if (p) {
