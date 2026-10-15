@@ -108,6 +108,7 @@ enum {
     WM_MPC_OPENCURPLAYLIST,
     WM_MPC_CMDLINE, // deliberately outside the range purged while closing: a command line must not be dropped
     WM_MPC_RUN_DEFERRED, // run an open/close/OnClose recorded while a CMainFrame::CDeferredActionScope holder was on the stack
+    WM_MPC_FILEREADYPROBE, // result of the background "is the file readable again" probe before a resume reload
     WM_LAV_PROPPAGE_CALLBACK,
     WM_MPCVR_SWITCH_FULLSCREEN = WM_APP + 4096,
 };

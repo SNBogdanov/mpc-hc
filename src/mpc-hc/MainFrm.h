@@ -487,6 +487,12 @@ private:
     int m_iReloadAudioIdx;
     int m_iReloadSubIdx;
 
+    // Set while a background probe waits for a paused file to answer again before
+    // the long-pause reload tears down the graph. The path is kept so a late probe
+    // result for a file we are no longer on can be ignored.
+    bool m_bFileReadyProbeActive;
+    CString m_fileReadyProbePath;
+
     bool m_bRememberFilePos;
 
     ULONGLONG m_dwLastRun;
@@ -731,6 +737,10 @@ protected:
     void AutoChangeMonitorMode();
 
     void GraphEventComplete();
+
+    // Starts the background probe that waits for the current file to become
+    // readable again. Returns false if the probe thread could not be started.
+    bool StartFileReadyProbe();
 
     friend class CGraphThread;
     CGraphThread* m_pGraphThread;
@@ -1040,6 +1050,7 @@ public:
     afx_msg LRESULT OnFilePostOpenmedia(WPARAM wParam, LPARAM lparam);
     afx_msg LRESULT OnOpenMediaFailed(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnRunDeferredActions(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnFileReadyProbe(WPARAM wParam, LPARAM lParam);
 
     // Only reached in headless scan mode: with the dialog running these go to
     // it instead, because DoTunerScan sends to the HWND it was handed.

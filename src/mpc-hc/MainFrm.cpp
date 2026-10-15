@@ -21,6 +21,7 @@
 
 #include "stdafx.h"
 #include <optional>
+#include <process.h>
 #include "MainFrm.h"
 #include "mplayerc.h"
 #include "version.h"
@@ -332,6 +333,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
     ON_MESSAGE(WM_POSTOPEN, OnFilePostOpenmedia)
     ON_MESSAGE(WM_OPENFAILED, OnOpenMediaFailed)
     ON_MESSAGE(WM_MPC_RUN_DEFERRED, OnRunDeferredActions)
+    ON_MESSAGE(WM_MPC_FILEREADYPROBE, OnFileReadyProbe)
     ON_MESSAGE(WM_TUNER_NEW_CHANNEL, OnHeadlessScanNewChannel)
     ON_MESSAGE(WM_TUNER_SCAN_END, OnHeadlessScanEnd)
     ON_MESSAGE(WM_DVB_EIT_DATA_READY, OnCurrentChannelInfoUpdated)
@@ -857,6 +859,8 @@ CMainFrame::CMainFrame()
     , m_rtReloadPos(-1)
     , m_iReloadAudioIdx(-1)
     , m_iReloadSubIdx(-1)
+    , m_bFileReadyProbeActive(false)
+    , m_fileReadyProbePath(L"")
     , m_bRememberFilePos(false)
     , m_dwLastRun(0)
     , m_nLastAppendSelectionIndex(0)
@@ -2420,10 +2424,13 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
                             }
                             m_pMS->GetDuration(&rtDur);
 
-                            // prefer the trusted duration (MediaInfo / saved playlist) for the
-                            // "total time" shown in the status bar and OSD
-                            if (REFERENCE_TIME rtTrusted = m_wndPlaylistBar.GetCurDuration()) {
-                                rtDur = rtTrusted;
+                            // The trusted duration (MediaInfo / saved playlist) is only used for the
+                            // "total time" text. rtDur stays the graph's own duration, because the
+                            // seek bar / OSD / LCD ranges below are drawn against the live graph
+                            // position and must use the same time base as it.
+                            REFERENCE_TIME rtStatusDur = m_wndPlaylistBar.GetCurDuration();
+                            if (!rtStatusDur) {
+                                rtStatusDur = rtDur;
                             }
 
                             if ((abRepeat.positionA && rtNow < abRepeat.positionA || abRepeat.positionB && rtNow >= abRepeat.positionB) && GetMediaState() != State_Stopped) {
@@ -2449,7 +2456,7 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
                                 m_lSubtitleShift = 0;
                             }
 
-                            m_wndStatusBar.SetStatusTimer(rtNow, rtDur, IsSubresyncBarVisible(), GetTimeFormat());
+                            m_wndStatusBar.SetStatusTimer(rtNow, rtStatusDur, IsSubresyncBarVisible(), GetTimeFormat());
 
                             if (AfxGetAppSettings().bAutoCopySubtitleToClipboard && rtNow >= m_rtNextAutoCopySubtitle) {
                                 m_rtNextAutoCopySubtitle = CopyCurrentSubtitleToClipboard(rtNow);
@@ -4738,7 +4745,9 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
     bool bAfterPlaybackEvent = false;
 
     m_bOpenMediaActive = false;
-    // m_OpenMediaFailedCount++;
+    // consecutive failed opens; the repeated-playlist check below compares it with
+    // the item count to detect that everything in the list is unavailable
+    m_OpenMediaFailedCount++;
 
     m_reloadFilename.Empty();
     m_rtReloadPos = -1;
@@ -4746,13 +4755,23 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
     m_iReloadAudioIdx = -1;
     m_iReloadSubIdx = -1;
 
-    if (wParam == PM_FILE && m_OpenMediaFailedCount < 5) {
+    // No fixed cap on the run of failed opens: any file that cannot be opened is
+    // skipped and the list is walked to its end. If the list is set to repeat and a
+    // whole pass has failed, every item is unavailable, so there is nothing left to
+    // loop to and we stop. Without repeat the list runs out on its own and the
+    // after-playback action fires as usual.
+    const int playlistCount = m_wndPlaylistBar.GetCount();
+    const bool repeatingList = playlistCount > 1
+        && (s.fLoopForever || s.eLoopMode == CAppSettings::LoopMode::PLAYLIST);
+    bool bStopAllUnavailable = false;
+
+    if (wParam == PM_FILE) {
         CPlaylistItem pli;
         if (m_wndPlaylistBar.GetCur(pli) && pli.m_bYoutubeDL && m_sydlLastProcessURL != pli.m_ydlSourceURL) {
             OpenCurPlaylistItem(0, true);  // Try to reprocess if failed first time.
             return 0;
         }
-        if (m_wndPlaylistBar.GetCount() == 1) {
+        if (playlistCount == 1) {
             if (m_nLastSkipDirection == ID_NAVIGATE_SKIPBACK) {
                 bOpenNextInPlaylist = SearchInDir(false, s.bLoopFolderOnPlayNextFile);
                 if (!bOpenNextInPlaylist) {
@@ -4772,7 +4791,10 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
             }
 
             if (s.fLoopForever || m_nLoops < s.nLoops) {
-                if (m_nLastSkipDirection == ID_NAVIGATE_SKIPBACK) {
+                if (repeatingList && m_OpenMediaFailedCount >= playlistCount) {
+                    // a whole pass over the repeated list has failed to open
+                    bStopAllUnavailable = true;
+                } else if (m_nLastSkipDirection == ID_NAVIGATE_SKIPBACK) {
                     bOpenNextInPlaylist = m_wndPlaylistBar.SetPrev();
                 } else {
                     bOpenNextInPlaylist = m_wndPlaylistBar.SetNext();
@@ -4785,19 +4807,14 @@ LRESULT CMainFrame::OnOpenMediaFailed(WPARAM wParam, LPARAM lParam)
 
     CloseMedia(bOpenNextInPlaylist);
 
-    if (m_OpenMediaFailedCount >= 5) {
-        m_wndPlaylistBar.SetCurValid(false);
-        if (m_wndPlaylistBar.IsAtEnd()) {
-            m_nLoops++;
-        }
-        if (s.fLoopForever || m_nLoops < s.nLoops) {
-            if (m_nLastSkipDirection == ID_NAVIGATE_SKIPBACK) {
-                m_wndPlaylistBar.SetPrev();
-            } else {
-                m_wndPlaylistBar.SetNext();
-            }
-        }
+    if (bStopAllUnavailable) {
         m_OpenMediaFailedCount = 0;
+        m_closingmsg = L"All files in the playlist are unavailable";
+        if (USE_LOGGER(s)) {
+            PLAYER_LOG(_T("CMainFrame::OnOpenMediaFailed - all %d items in the repeated playlist are unavailable, stopping"), playlistCount);
+            FLUSH_LOGGER();
+        }
+        m_OSD.DisplayMessage(OSD_TOPLEFT, m_closingmsg, 4000);
     }
     else if (bOpenNextInPlaylist) {
         OpenCurPlaylistItem();
@@ -9866,6 +9883,115 @@ void CMainFrame::OnViewOptions()
     ShowOptions();
 }
 
+namespace {
+
+    // How long the resume probe keeps waiting for a paused file to answer again.
+    // Long enough to ride out a sleeping NAS or a stalled redirector, short enough
+    // that a genuinely dead server does not hold the resume forever.
+    constexpr ULONGLONG FILE_READY_PROBE_TIMEOUT_MS = 30ULL * 1000;
+    constexpr DWORD FILE_READY_PROBE_INTERVAL_MS = 250;
+
+    struct FileReadyProbeContext {
+        HWND hwnd;
+        CString path;
+    };
+
+    // Opening the file and reading one byte really talks to the server, unlike a
+    // cached GetFileAttributes. Polling it off the UI thread keeps the player
+    // responsive while a stale session reconnects.
+    unsigned __stdcall FileReadyProbeProc(void* param)
+    {
+        auto* ctx = static_cast<FileReadyProbeContext*>(param);
+        const ULONGLONG deadline = GetTickCount64() + FILE_READY_PROBE_TIMEOUT_MS;
+        bool ready = false;
+        for (;;) {
+            HANDLE hFile = ::CreateFile(ctx->path, GENERIC_READ,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                BYTE b = 0;
+                DWORD read = 0;
+                ready = ::ReadFile(hFile, &b, 1, &read, nullptr) && read == 1;
+                ::CloseHandle(hFile);
+                if (ready) {
+                    break;
+                }
+            }
+            if (GetTickCount64() >= deadline) {
+                break;
+            }
+            ::Sleep(FILE_READY_PROBE_INTERVAL_MS);
+        }
+        ::PostMessage(ctx->hwnd, WM_MPC_FILEREADYPROBE, ready ? 1 : 0, 0);
+        delete ctx;
+        return 0;
+    }
+
+} // namespace
+
+bool CMainFrame::StartFileReadyProbe()
+{
+    if (m_bFileReadyProbeActive) {
+        return true;
+    }
+    m_bFileReadyProbeActive = true;
+    m_fileReadyProbePath = lastOpenFile;
+
+    auto* ctx = new FileReadyProbeContext{ m_hWnd, lastOpenFile };
+    unsigned threadId = 0;
+    HANDLE hThread = reinterpret_cast<HANDLE>(
+        _beginthreadex(nullptr, 0, FileReadyProbeProc, ctx, 0, &threadId));
+    if (!hThread) {
+        delete ctx;
+        m_bFileReadyProbeActive = false;
+        m_fileReadyProbePath.Empty();
+        return false;
+    }
+    ::CloseHandle(hThread);
+    return true;
+}
+
+LRESULT CMainFrame::OnFileReadyProbe(WPARAM wParam, LPARAM /*lParam*/)
+{
+    if (!m_bFileReadyProbeActive) {
+        return 0;
+    }
+    m_bFileReadyProbeActive = false;
+
+    const CString probedPath = m_fileReadyProbePath;
+    m_fileReadyProbePath.Empty();
+
+    // A different open or close superseded the probe; drop the stale result.
+    if (probedPath != lastOpenFile || GetPlaybackMode() != PM_FILE || GetLoadState() != MLS::LOADED) {
+        return 0;
+    }
+
+    const auto& s = AfxGetAppSettings();
+    if (!wParam) {
+        // The file never answered. Leave the paused graph alone instead of tearing
+        // it down into a reopen that would block on the dead session.
+        if (USE_LOGGER(s)) {
+            PLAYER_LOG(_T("CMainFrame::OnFileReadyProbe (thread %lu) - file did not become readable, reload skipped"), GetCurrentThreadId());
+            FLUSH_LOGGER();
+        }
+        m_closingmsg = L"The file did not respond in time";
+        m_OSD.DisplayMessage(OSD_TOPLEFT, L"The file did not respond in time. Playback is paused.", 4000);
+        return 0;
+    }
+
+    if (USE_LOGGER(s)) {
+        PLAYER_LOG(_T("CMainFrame::OnFileReadyProbe (thread %lu) - file readable, reloading graph"), GetCurrentThreadId());
+        FLUSH_LOGGER();
+    }
+    m_reloadFilename = lastOpenFile;
+    m_rtReloadPos = m_fEndOfStream ? 0LL : m_wndSeekBar.GetPos();
+    reloadABRepeat = abRepeat;
+    m_iReloadAudioIdx = GetCurrentAudioTrackIdx();
+    m_iReloadSubIdx = GetCurrentSubtitleTrackIdx();
+    OnFileReopen();
+    return 0;
+}
+
 // play
 
 void CMainFrame::OnPlayPlay()
@@ -9904,6 +10030,18 @@ void CMainFrame::OnPlayPlay()
             if (!m_bFirstPlay && !m_fAudioOnly && m_wndSeekBar.HasDuration() && m_dwLastPause && s.iReloadAfterLongPause > 0) {
                 // after long pause reload video file to avoid playback issues on some systems (with buggy drivers)
                 if (GetTickCount64() - m_dwLastPause >= s.iReloadAfterLongPause * 60 * 1000ULL) {
+                    // The graph still holds the file open, but the session behind it can be
+                    // idle-stale, and tearing the graph down then blocks inside the reopen
+                    // until the session recovers. Wait for the file to answer again first, so
+                    // the rebuild runs against a live session instead of deadlocking.
+                    if (!PathUtils::IsURL(lastOpenFile) && StartFileReadyProbe()) {
+                        if (USE_LOGGER(s)) {
+                            PLAYER_LOG(_T("CMainFrame::OnPlayPlay (thread %lu) - waiting for file to become readable before reload"), GetCurrentThreadId());
+                            FLUSH_LOGGER();
+                        }
+                        m_OSD.DisplayMessage(OSD_TOPLEFT, L"Waiting for the file to become readable...", 3000);
+                        return;
+                    }
                     m_reloadFilename = lastOpenFile;
                     m_rtReloadPos = m_fEndOfStream ? 0LL : m_wndSeekBar.GetPos();
                     reloadABRepeat = abRepeat;
