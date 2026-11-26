@@ -4983,6 +4983,32 @@ msgstr ""
 "Usa libass (invece del renderer standard) per i sottotitoli SRT. "
 "Sconsigliato."
 
+msgctxt "IDS_PPAGEADVANCED_DELETE_WATCHED"
+msgid ""
+"Delete the file after it finishes playing. Uses the recycle bin unless "
+"started with /delwatched:permanent."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_CONFIRM_DELETED"
+msgid "Ask before deleting a watched file automatically."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_DELETE_WATCHED_SUBS"
+msgid "Also delete subtitle files that share the file name."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_DELETE_WATCHED_HISTORY"
+msgid "Remove the deleted file from recent files and history."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_DELETE_WATCHED_THUMB"
+msgid "Also delete a same-named .jpg thumbnail/poster."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_DELETE_WATCHED_AUDIO"
+msgid "Also delete same-named external audio track files."
+msgstr ""
+
 msgctxt "IDS_PPAGEADVANCED_OPEN_REC_PANEL_WHEN_OPENING_DEVICE"
 msgid ""
 "Show the recording settings dialog automatically when opening a device."
@@ -5354,6 +5380,22 @@ msgstr ""
 
 msgctxt "IDS_PPAGEADVANCED_GRP_MISC"
 msgid "Miscellaneous"
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_GRP_WATCHED"
+msgid "Watched files"
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_GRAPH_CLOSE_SHOW_DIALOG"
+msgid ""
+"Show a dialog when closing the filter graph times out. When disabled, the "
+"player continues automatically without terminating."
+msgstr ""
+
+msgctxt "IDS_PPAGEADVANCED_GRAPH_CLOSE_TIMEOUT"
+msgid ""
+"Seconds before the graph close timeout dialog automatically chooses the safe"
+" option (continue without terminating the player)."
 msgstr ""
 
 msgctxt "IDS_REPLAYGAIN_MODE_OFF"

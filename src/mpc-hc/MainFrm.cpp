@@ -20,6 +20,7 @@
  */
 
 #include "stdafx.h"
+#include <afxpriv.h>
 #include <optional>
 #include <process.h>
 #include "MainFrm.h"
@@ -130,6 +131,63 @@ DECLARE_INTERFACE_IID_(IAMLine21Decoder_2, IAMLine21Decoder, "6E8D4A21-310C-11d0
 
 #define MIN_LOGO_WIDTH 360
 #define MIN_LOGO_HEIGHT 150
+
+// Auto-confirming prompt for a filter graph that refuses to close.
+// TDF_CALLBACK_TIMER makes the dialog emit TDN_TIMER notifications; once
+// 'seconds' have elapsed we press "No" (continue without terminating) so an
+// unattended player keeps running instead of force-killing the process.
+static HRESULT CALLBACK GraphCloseTimeoutCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM /*lParam*/, LONG_PTR lpRefData)
+{
+    if (msg == TDN_TIMER) {
+        const int total = static_cast<int>(lpRefData);
+        const int elapsed = static_cast<int>(wParam / 1000);
+
+        if (total <= 0 || elapsed >= total) {
+            ::SendMessageW(hwnd, TDM_CLICK_BUTTON, IDNO, 0);
+        } else {
+            wchar_t buf[160];
+            swprintf_s(buf, _countof(buf), L"Continuing automatically in %d second%s...\n\nClick YES to terminate the player process.", total - elapsed, (total - elapsed) == 1 ? L"" : L"s");
+            ::SendMessageW(hwnd, TDM_SET_ELEMENT_TEXT, TDE_CONTENT, reinterpret_cast<LPARAM>(buf));
+        }
+    }
+    return S_OK;
+}
+
+// Returns IDYES when the player should be terminated, otherwise the playback continues.
+static int ShowGraphCloseTimeoutDialog(HWND hwndParent, const wchar_t* content, int seconds)
+{
+    typedef HRESULT(WINAPI * PFN_TaskDialogIndirect)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+    static PFN_TaskDialogIndirect pTaskDialogIndirect = []() -> PFN_TaskDialogIndirect {
+        HMODULE hComCtl = ::GetModuleHandleW(L"comctl32.dll");
+        if (!hComCtl) {
+            hComCtl = ::LoadLibraryW(L"comctl32.dll");
+        }
+        return hComCtl ? reinterpret_cast<PFN_TaskDialogIndirect>(::GetProcAddress(hComCtl, "TaskDialogIndirect")) : nullptr;
+    }();
+
+    if (!pTaskDialogIndirect) {
+        return ::MessageBoxW(hwndParent, content, L"MPC-HC", MB_ICONEXCLAMATION | MB_YESNO | MB_DEFBUTTON2);
+    }
+
+    TASKDIALOGCONFIG config = {};
+    config.cbSize = sizeof(config);
+    config.hwndParent = hwndParent;
+    config.dwFlags = TDF_CALLBACK_TIMER | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle = L"MPC-HC";
+    config.pszMainIcon = TD_WARNING_ICON;
+    config.pszMainInstruction = L"Timeout when closing filter graph";
+    config.pszContent = content;
+    config.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
+    config.nDefaultButton = IDNO;
+    config.pfCallback = GraphCloseTimeoutCallback;
+    config.lpCallbackData = static_cast<LONG_PTR>(seconds);
+
+    int pressed = IDNO;
+    if (FAILED(pTaskDialogIndirect(&config, &pressed, nullptr, nullptr))) {
+        return ::MessageBoxW(hwndParent, content, L"MPC-HC", MB_ICONEXCLAMATION | MB_YESNO | MB_DEFBUTTON2);
+    }
+    return pressed;
+}
 
 #define PREV_CHAP_THRESHOLD 2
 
@@ -265,6 +323,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
     ON_WM_MEASUREITEM()
 
     ON_MESSAGE(WM_MPCVR_SWITCH_FULLSCREEN, OnMPCVRSwitchFullscreen)
+    ON_MESSAGE(WM_HELPPROMPTADDR, OnHelpPromptAddr)
 
     ON_REGISTERED_MESSAGE(s_uTaskbarRestart, OnTaskBarRestart)
     ON_REGISTERED_MESSAGE(WM_NOTIFYICON, OnNotifyIcon)
@@ -334,6 +393,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
     ON_MESSAGE(WM_OPENFAILED, OnOpenMediaFailed)
     ON_MESSAGE(WM_MPC_RUN_DEFERRED, OnRunDeferredActions)
     ON_MESSAGE(WM_MPC_FILEREADYPROBE, OnFileReadyProbe)
+    ON_MESSAGE(WM_MPC_DELETEWATCHED, OnFileDeleteWatched)
     ON_MESSAGE(WM_TUNER_NEW_CHANNEL, OnHeadlessScanNewChannel)
     ON_MESSAGE(WM_TUNER_SCAN_END, OnHeadlessScanEnd)
     ON_MESSAGE(WM_DVB_EIT_DATA_READY, OnCurrentChannelInfoUpdated)
@@ -885,6 +945,7 @@ CMainFrame::CMainFrame()
     , m_fStartInFullscreenSeparate(false)
     , m_pLastBar(nullptr)
     , m_bFirstPlay(false)
+    , m_bSpeedOsdDone(false)
     , m_bOpeningInAutochangedMonitorMode(false)
     , m_bPausedForAutochangeMonitorMode(false)
     , m_fAudioOnly(true)
@@ -1001,6 +1062,8 @@ CMainFrame::CMainFrame()
 
 CMainFrame::~CMainFrame()
 {
+    StopPreviewSeekThread();
+
     if (defaultMPCThemeMenu != nullptr) {
         delete defaultMPCThemeMenu;
     }
@@ -1026,6 +1089,12 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
 {
     if (__super::OnCreate(lpCreateStruct) == -1) {
         return -1;
+    }
+
+    {
+        const CAppSettings& cfg = AfxGetAppSettings();
+        m_dSpeedRate = (cfg.iWindowPreset >= 1 && cfg.dSpeedRate >= 0.05 && cfg.dSpeedRate <= 16.0)
+                           ? cfg.dSpeedRate : 1.0;
     }
 
     CMPCThemeUtil::enableWindows10DarkFrame(this);
@@ -1167,6 +1236,9 @@ int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
         m_pGraphThread->SetMainFrame(this);
     }
 
+    StartPreviewSeekThread();
+    m_whisparrWatched.Start();
+
     m_pSubtitlesProviders = std::make_unique<SubtitlesProviders>(this);
     m_wndSubtitlesDownloadDialog.Create(m_wndSubtitlesDownloadDialog.IDD, this);
     //m_wndSubtitlesUploadDialog.Create(m_wndSubtitlesUploadDialog.IDD, this);
@@ -1265,6 +1337,8 @@ LRESULT CMainFrame::OnLAVPropPageCallback(WPARAM, LPARAM lParam)
 
 void CMainFrame::OnDestroy()
 {
+    m_whisparrWatched.Stop();
+    StopPreviewSeekThread();
     WTSUnRegisterSessionNotification();
     ShowTrayIcon(false);
     m_dropTarget.Revoke();
@@ -1931,6 +2005,22 @@ void CMainFrame::OnSize(UINT nType, int cx, int cy)
             s.nLastWindowType = nType;
         }
     }
+    if (m_bRestoreHiddenWindowPlacement && (nType == SIZE_RESTORED || nType == SIZE_MAXIMIZED)) {
+        m_bRestoreHiddenWindowPlacement = false;
+        // Put the window back on the monitor it was hidden on, but only when
+        // that monitor is present again and the restore state matches the one
+        // captured before hiding; otherwise let Windows choose.
+        const bool savedMaximized = (m_hiddenWindowPlacement.showCmd == SW_SHOWMAXIMIZED);
+        if (savedMaximized == (nType == SIZE_MAXIMIZED) &&
+            MonitorFromRect(m_hiddenWindowRect, MONITOR_DEFAULTTONULL)) {
+            WINDOWPLACEMENT wp = m_hiddenWindowPlacement;
+            if (wp.showCmd == SW_SHOWMINIMIZED) {
+                wp.showCmd = SW_SHOWNORMAL;
+            }
+            SetWindowPlacement(&wp);
+        }
+    }
+
     if (nType != SIZE_MINIMIZED) {
         OSDBarSetPos();
     }
@@ -2233,6 +2323,14 @@ void CMainFrame::OnSysCommand(UINT nID, LPARAM lParam)
         PLAYER_LOG(_T("CMainFrame::OnSysCommand - nID=0x%x lParam=%ld"), nID, lParam);
     }
 
+    if ((nID & 0xFFF0) == SC_MINIMIZE && !m_bRestoreHiddenWindowPlacement && IsWindowVisible() && !IsIconic()) {
+        m_hiddenWindowPlacement.length = sizeof(m_hiddenWindowPlacement);
+        if (GetWindowPlacement(&m_hiddenWindowPlacement)) {
+            ::GetWindowRect(m_hWnd, &m_hiddenWindowRect);
+            m_bRestoreHiddenWindowPlacement = true;
+        }
+    }
+
     __super::OnSysCommand(nID, lParam);
 }
 
@@ -2409,6 +2507,20 @@ void CMainFrame::OnTimer(UINT_PTR nIDEvent)
             delayingFullScreen = false;
             break;
         case TIMER_STREAMPOSPOLLER:
+            // Keep "on top while playing" in sync with reality. It is normally
+            // applied on play/pause/stop, but some transitions (restore from
+            // tray, moving to the next file) can miss it; correct any mismatch
+            // here so the window ends up in the expected z-order.
+            {
+                const auto& st = AfxGetAppSettings();
+                if (!IsFullScreenMode() && (st.iOnTop == 2 || st.iOnTop == 3)) {
+                    const bool wantOnTop = WindowExpectedOnTop();
+                    const bool isOnTop = (GetExStyle() & WS_EX_TOPMOST) != 0;
+                    if (wantOnTop != isOnTop) {
+                        SetAlwaysOnTop(st.iOnTop);
+                    }
+                }
+            }
             if (GetLoadState() == MLS::LOADED) {
                 REFERENCE_TIME rtNow = 0, rtDur = 0;
                 switch (GetPlaybackMode()) {
@@ -3060,7 +3172,10 @@ void CMainFrame::DoAfterPlaybackEvent()
                 PostMessage(WM_COMMAND, ID_FILE_CLOSE_AND_RESTORE);
                 break;
             case CAppSettings::AfterPlayback::EXIT:
-                if (GetLoadState() != MLS::CLOSED) {
+                // The graph can already be closed here: the last watched file
+                // was deleted, or the last open failed. Exiting must still
+                // happen, so only skip it while the app is already closing.
+                if (!AfxGetMyApp()->m_fClosingState) {
                     PostMessage(WM_COMMAND, ID_FILE_EXIT);
                 }
                 break;
@@ -3253,6 +3368,27 @@ void CMainFrame::GraphEventComplete()
             m_pBA->put_Volume(m_nVolumeBeforeFrameStepping);
         }
         m_fEndOfStream = true;
+        return;
+    }
+
+    // Queue a "viewed" mark for Whisparr. The event is written locally and
+    // delivered when the server is reachable, so offline playback still counts.
+    if (GetPlaybackMode() == PM_FILE && !lastOpenFile.IsEmpty() && !abRepeat) {
+        m_whisparrWatched.Enqueue(lastOpenFile);
+    }
+
+    // Delete the file that just finished, if enabled. Only the natural
+    // end-of-file path reaches this handler, so a manual skip is never affected.
+    // Any repeat mode leaves the file alone.
+    if ((s.bDeleteWatched || (s.nCLSwitches & CLSW_DELETEWATCHED))
+        && GetPlaybackMode() == PM_FILE
+        && !abRepeat
+        && !s.fLoopForever
+        && s.nLoops <= 1
+        && s.eLoopMode != CAppSettings::LoopMode::FILE
+        && !lastOpenFile.IsEmpty()
+        && !PathUtils::IsURL(lastOpenFile)) {
+        PostMessage(WM_MPC_DELETEWATCHED);
         return;
     }
 
@@ -4427,6 +4563,16 @@ void CMainFrame::OnUpdatePlayerStatus(CCmdUI* pCmdUI)
     } else {
         m_wndStatusBar.SetStatusMessage(m_closingmsg);
     }
+}
+
+// MFC's message box saves its help context in the frame (CFrameWnd::m_dwPromptContext)
+// and writes it back after MessageBox returns. The frame can be destroyed while a
+// message box it owns is up, e.g. the first-run update prompt in InitInstance, and
+// that write then lands in freed memory. Returning 0 makes MFC use the app's context,
+// which lives for the whole process; it only matters for WinHelp, which we do not use.
+LRESULT CMainFrame::OnHelpPromptAddr(WPARAM wParam, LPARAM lParam)
+{
+    return 0;
 }
 
 LRESULT CMainFrame::OnFilePostOpenmedia(WPARAM wParam, LPARAM lParam)
@@ -9245,6 +9391,9 @@ void CMainFrame::OnViewModifySize(UINT nID) {
 
     MINMAXINFO mmi;
     CSize videoSize = GetVideoOrArtSize(mmi);
+    if (videoSize.cx <= 0 || videoSize.cy <= 0) {
+        return;
+    }
     int minWidth = (int)mmi.ptMinTrackSize.x;
 
     int mult = (nID == ID_VIEW_ZOOM_ADD ? 1 : ID_VIEW_ZOOM_SUB ? -1 : 0);
@@ -9992,6 +10141,144 @@ LRESULT CMainFrame::OnFileReadyProbe(WPARAM wParam, LPARAM /*lParam*/)
     return 0;
 }
 
+namespace {
+    void CollectSameStemCompanions(const CString& mediaPath, bool wantSubs, bool wantThumb,
+                                   bool wantAudio, std::vector<CString>& out)
+    {
+        static const LPCTSTR subExts[] = {
+            L".srt", L".ass", L".ssa", L".sub", L".idx", L".sup",
+            L".vtt", L".smi", L".sami", L".ttml", L".dfxp"
+        };
+        static const LPCTSTR thumbExts[] = { L".jpg", L".jpeg" };
+        static const LPCTSTR audioExts[] = {
+            L".mka", L".ac3", L".eac3", L".dts", L".dtshd", L".aac",
+            L".flac", L".mp3", L".ogg", L".opus", L".wav", L".wma", L".thd", L".mlp"
+        };
+        const auto matches = [](const CString& ext, const LPCTSTR* list, size_t n) {
+            for (size_t i = 0; i < n; ++i) {
+                if (ext == list[i]) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const int slash = mediaPath.ReverseFind(L'\\');
+        if (slash < 0) {
+            return;
+        }
+        const CString dir = mediaPath.Left(slash + 1);
+        CString stem = mediaPath.Mid(slash + 1);
+        const int dot = stem.ReverseFind(L'.');
+        if (dot > 0) {
+            stem = stem.Left(dot);
+        }
+        WIN32_FIND_DATAW fd = {};
+        HANDLE h = FindFirstFileExW(dir + stem + L".*", FindExInfoBasic, &fd,
+                                    FindExSearchNameMatch, nullptr, 0);
+        if (h == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                continue;
+            }
+            CString name = fd.cFileName;
+            const int d = name.ReverseFind(L'.');
+            if (d < 0) {
+                continue;
+            }
+            CString ext = name.Mid(d);
+            ext.MakeLower();
+            const bool wanted = (wantSubs && matches(ext, subExts, _countof(subExts)))
+                             || (wantThumb && matches(ext, thumbExts, _countof(thumbExts)))
+                             || (wantAudio && matches(ext, audioExts, _countof(audioExts)));
+            if (wanted) {
+                CString full = dir + name;
+                if (full.CompareNoCase(mediaPath) != 0) {
+                    out.push_back(full);
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+}
+
+LRESULT CMainFrame::OnFileDeleteWatched(WPARAM /*wParam*/, LPARAM /*lParam*/)
+{
+    CAppSettings& s = AfxGetAppSettings();
+
+    if (GetLoadState() != MLS::LOADED || GetPlaybackMode() != PM_FILE) {
+        return 0;
+    }
+
+    CString path = m_wndPlaylistBar.GetCurFileName();
+    if (path.IsEmpty() || PathUtils::IsURL(path)) {
+        // Not a deletable file: behave like a normal transition.
+        PostMessage(WM_COMMAND, ID_NAVIGATE_SKIPFORWARDFILE);
+        return 0;
+    }
+
+    if (s.bConfirmDeleted) {
+        CString msg;
+        msg.Format(L"Delete watched file?\n\n%s", path.GetString());
+        if (AfxMessageBox(msg, MB_ICONQUESTION | MB_YESNO, 0) != IDYES) {
+            // Declined: just move on to the next item.
+            PostMessage(WM_COMMAND, ID_NAVIGATE_SKIPFORWARDFILE);
+            return 0;
+        }
+    }
+
+    const bool permanent = (s.nCLSwitches & CLSW_DELETEWATCHED_PERMANENT) != 0;
+    const bool recycle = !permanent;
+
+    if (USE_LOGGER(s)) {
+        PLAYER_LOG(_T("CMainFrame::OnFileDeleteWatched - deleting %s (%s)"),
+                   path.GetString(), permanent ? L"permanent" : L"recycle");
+        FLUSH_LOGGER();
+    }
+
+    std::vector<CString> companions;
+    if (s.bDeleteWatchedSubs || s.bDeleteWatchedThumb || s.bDeleteWatchedAudio) {
+        CollectSameStemCompanions(path, s.bDeleteWatchedSubs, s.bDeleteWatchedThumb,
+                                  s.bDeleteWatchedAudio, companions);
+    }
+
+    const bool wasAtEnd = m_wndPlaylistBar.IsAtEnd();
+    // This closes the graph (releasing the media and any loaded subtitle
+    // handles) and deletes the media file. When this was the last item there is
+    // no next file; the configured after-playback action runs below instead.
+    m_wndPlaylistBar.DeleteFileInPlaylist(m_wndPlaylistBar.m_pl.GetPos(), recycle, /*silent=*/true, /*playNext=*/!wasAtEnd);
+
+    // Companion files are separate; delete them once the graph has let go.
+    for (const auto& companion : companions) {
+        FileDelete(companion, m_hWnd, recycle, true);
+    }
+
+    if (s.bDeleteWatchedHistory) {
+        std::list<CStringW> hashes;
+        auto& mru = s.MRU;
+        for (size_t i = 0; i < mru.rfe_array.GetCount(); ++i) {
+            const RecentFileEntry& r = mru.rfe_array[i];
+            if (!r.fns.IsEmpty() && CString(r.fns.GetHead()).CompareNoCase(path) == 0) {
+                hashes.push_back(r.hash);
+            }
+        }
+        if (!hashes.empty()) {
+            mru.RemoveEntries(hashes);
+            mru.SaveMediaHistory();
+        }
+    }
+
+    if (wasAtEnd) {
+        // The last file in the playlist is gone, so run the configured
+        // after-playback action (close/exit/etc.) instead of just stopping.
+        DoAfterPlaybackEvent();
+    }
+
+    return 0;
+}
+
 // play
 
 void CMainFrame::OnPlayPlay()
@@ -10141,6 +10428,17 @@ void CMainFrame::OnPlayPlay()
             strOSD = strPlay;
         }
         if (GetPlaybackMode() != PM_DIGITAL_CAPTURE) {
+            // On the first file, append the restored playback speed so it is not
+            // silently active. It shares the filename OSD instead of replacing it.
+            if (!m_bSpeedOsdDone) {
+                m_bSpeedOsdDone = true;
+                if (m_dSpeedRate != 1.0) {
+                    CString strSpeed;
+                    strSpeed.Format(IDS_OSD_SPEED, m_dSpeedRate);
+                    strOSD += L"\n";
+                    strOSD += strSpeed;
+                }
+            }
             m_OSD.DisplayMessage(OSD_TOPLEFT, strOSD, 3000);
         }
     }
@@ -10276,7 +10574,9 @@ void CMainFrame::OnPlayStop(bool is_closing)
         }
 
         if (!m_fEndOfStream) {
-            m_dSpeedRate = 1.0;
+            const CAppSettings& cfg = AfxGetAppSettings();
+            m_dSpeedRate = (cfg.iWindowPreset >= 1 && cfg.dSpeedRate >= 0.05 && cfg.dSpeedRate <= 16.0)
+                               ? cfg.dSpeedRate : 1.0;
         }
 
         if (m_fFrameSteppingActive) {
@@ -10666,6 +10966,7 @@ void CMainFrame::SetPlayingRate(double rate)
     }
     if (SUCCEEDED(hr)) {
         m_dSpeedRate = rate;
+        AfxGetAppSettings().dSpeedRate = rate;
         CString strODSMessage;
         strODSMessage.Format(IDS_OSD_SPEED, rate);
         m_OSD.DisplayMessage(OSD_TOPRIGHT, strODSMessage);
@@ -10868,6 +11169,7 @@ void CMainFrame::OnPlayResetRate()
 
     if (SUCCEEDED(hr)) {
         m_dSpeedRate = 1.0;
+        AfxGetAppSettings().dSpeedRate = 1.0;
 
         CString strODSMessage;
         strODSMessage.Format(IDS_OSD_SPEED, m_dSpeedRate);
@@ -13775,9 +14077,10 @@ void CMainFrame::MoveVideoWindow(bool fShowStats/* = false*/, bool bSetStoppedVi
         windowRect.bottom += nCompensateForMenubar;
 
         OAFilterState fs = UpdateCachedMediaState();
-        if (fs == State_Running || fs == State_Paused || bSetStoppedVideoRect || m_fShockwaveGraph) {
-            const CSize szVideo = GetVideoSize();
-
+        const bool bPositionVideo = fs == State_Running || fs == State_Paused || bSetStoppedVideoRect || m_fShockwaveGraph;
+        // the renderer can report 0x0 for a loaded video, position it as if stopped rather than divide by it
+        const CSize szVideo = bPositionVideo ? GetVideoSize() : CSize(0, 0);
+        if (szVideo.cx > 0 && szVideo.cy > 0) {
             m_dLastVideoScaleFactor = std::min((double)windowRect.Size().cx / szVideo.cx,
                                                (double)windowRect.Size().cy / szVideo.cy);
             m_lastVideoSize = szVideo;
@@ -14269,6 +14572,9 @@ double CMainFrame::GetZoomAutoFitScale()
     const CAppSettings& s = AfxGetAppSettings();
 
     CSize arxy = GetVideoSize();
+    if (arxy.cx <= 0 || arxy.cy <= 0) {
+        return 1.0;
+    }
 
     // get the work area
     MONITORINFO mi;
@@ -14796,6 +15102,7 @@ void CMainFrame::OpenCreateGraphObject(OpenMediaData* pOMD)
         m_pBV_preview = m_pGB_preview;
         //m_pFS_preview = m_pGB_preview;
     }
+    SetPreviewSeekGraph();
 
     if (!(m_pMC && m_pME && m_pMS) || !(m_pVW && m_pBV) || !(m_pBA)) {
         throw (UINT)IDS_GRAPH_INTERFACES_ERROR;
@@ -14839,6 +15146,7 @@ void CMainFrame::ShowMediaTypesDialog() {
 
 void CMainFrame::ReleasePreviewGraph()
 {
+    ClearPreviewSeekGraph();
     if (m_pGB_preview) {
         m_pCAP2_preview.Release();
         m_pMFVP_preview.Release();
@@ -14860,6 +15168,93 @@ void CMainFrame::ReleasePreviewGraph()
         m_pGB_preview->RemoveFromROT();
         m_pGB_preview.Release();
     }
+}
+
+void CMainFrame::StartPreviewSeekThread()
+{
+    if (m_previewSeekThread.joinable()) {
+        return;
+    }
+    m_previewSeekState = std::make_shared<PreviewSeekState>();
+    auto state = m_previewSeekState;
+    m_previewSeekThread = std::thread([state]() { PreviewSeekLoop(state); });
+}
+
+void CMainFrame::StopPreviewSeekThread()
+{
+    if (m_previewSeekState) {
+        {
+            std::lock_guard<std::mutex> lock(m_previewSeekState->mutex);
+            m_previewSeekState->stop = true;
+            m_previewSeekState->pending = false;
+        }
+        m_previewSeekState->cv.notify_all();
+    }
+    if (m_previewSeekThread.joinable()) {
+        // Never block shutdown on a stalled preview graph. The worker keeps the
+        // shared state alive and only touches it, never the frame object.
+        m_previewSeekThread.detach();
+    }
+    m_previewSeekState.reset();
+}
+
+void CMainFrame::RequestPreviewSeek(REFERENCE_TIME rt)
+{
+    if (!m_previewSeekState) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_previewSeekState->mutex);
+        m_previewSeekState->target = rt;
+        m_previewSeekState->pending = true;
+    }
+    m_previewSeekState->cv.notify_one();
+}
+
+/*static*/
+void CMainFrame::PreviewSeekLoop(std::shared_ptr<PreviewSeekState> state)
+{
+    const HRESULT hrCom = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    for (;;) {
+        state->cv.wait(lock, [&state]() { return state->stop || state->pending; });
+        if (state->stop) {
+            break;
+        }
+        state->pending = false;
+        REFERENCE_TIME rt = state->target;
+        CComQIPtr<IMediaSeeking> pMS = state->pMS;
+        lock.unlock();
+        if (pMS) {
+            pMS->SetPositions(&rt, AM_SEEKING_AbsolutePositioning, nullptr, AM_SEEKING_NoPositioning);
+        }
+        lock.lock();
+    }
+    lock.unlock();
+
+    if (SUCCEEDED(hrCom)) {
+        ::CoUninitialize();
+    }
+}
+
+void CMainFrame::SetPreviewSeekGraph()
+{
+    if (!m_previewSeekState) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_previewSeekState->mutex);
+    m_previewSeekState->pMS = m_pMS_preview;
+}
+
+void CMainFrame::ClearPreviewSeekGraph()
+{
+    if (!m_previewSeekState) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_previewSeekState->mutex);
+    m_previewSeekState->pMS.Release();
+    m_previewSeekState->pending = false;
 }
 
 HRESULT CMainFrame::PreviewWindowHide() {
@@ -14950,7 +15345,11 @@ HRESULT CMainFrame::PreviewWindowShow(REFERENCE_TIME rtCur2) {
         Sleep(10);
         m_pMC_preview->Pause();
     } else if (GetPlaybackMode() == PM_FILE && m_pMS_preview) {
-        hr = m_pMS_preview->SetPositions(&rtCur2, AM_SEEKING_AbsolutePositioning, nullptr, AM_SEEKING_NoPositioning);
+        // Never seek the preview graph synchronously on the UI thread: a
+        // stalled decoder or GPU driver could hold a filter lock and freeze
+        // the whole interface. The worker coalesces mouse moves.
+        RequestPreviewSeek(rtCur2);
+        hr = S_OK;
     } else {
         return E_FAIL;
     }
@@ -21569,6 +21968,15 @@ void CMainFrame::CloseMediaInternal(bool bNextIsQueued/* = false*/, bool bPendin
                     if (tckill > cur) {
                         waitdur = tckill - cur;
                     } else {
+                        // The abort may have completed just as the wait window ran
+                        // out. Notice that before doing anything that would block
+                        // the wait (the old code only saw it after a prompt).
+                        if (::WaitForSingleObject(handle, 0) == WAIT_OBJECT_0) {
+                            killprocess = false;
+                            processmsg = false;
+                            bGraphTerminated = true;
+                            continue;
+                        }
                         if (!file_checked) {
                             file_checked = true;
                             if (!lastOpenFile.IsEmpty() && !PathUtils::IsURL(lastOpenFile)) {
@@ -21700,6 +22108,7 @@ void CMainFrame::CloseMediaInternal(bool bNextIsQueued/* = false*/, bool bPendin
         bool killprocess = true;
         bool processmsg = true;
         bool extendedwait = false;
+        bool autoContinueGrace = false;
         if (app_closing) {
             waitdur += 12000ULL;
         }
@@ -21752,7 +22161,9 @@ void CMainFrame::CloseMediaInternal(bool bNextIsQueued/* = false*/, bool bPendin
                     if (!extendedwait) {
                         ULONGLONG tcnow = GetTickCount64();
                         if (tcnow > tckill && tcnow - tckill >= 2000ULL) {
-                            extendedwait = true;
+                            // Give it a little more time, but keep the dialog path:
+                            // do not set extendedwait here, or the next timeout would
+                            // skip the prompt and force-terminate the player.
                             waitdur = 4000ULL;
                             tckill = GetTickCount64() + waitdur;
                             continue;
@@ -21795,7 +22206,8 @@ void CMainFrame::CloseMediaInternal(bool bNextIsQueued/* = false*/, bool bPendin
                         }
                     }
 
-                    if (extendedwait || m_fFullScreen || s.hMasterWnd || hibernating || app_closing || m_OnClose_queued) {
+                    const bool cannotPrompt = hibernating || app_closing || m_OnClose_queued;
+                    if (cannotPrompt) {
                         #if !defined(_DEBUG) && USE_DRDUMP_CRASH_REPORTER && (MPC_VERSION_REV > 10)
                         if (extendedwait && CrashReporter::IsEnabled()) {
                             if (IDYES == AfxMessageBox(L"It looks like the filter graph might be deadlocked.\n\nClick YES to submit a crash report.\nClick NO to terminate the player process.", MB_ICONEXCLAMATION | MB_YESNO, 0)) {
@@ -21803,25 +22215,40 @@ void CMainFrame::CloseMediaInternal(bool bNextIsQueued/* = false*/, bool bPendin
                             }
                         }
                         #endif
+                        // The player is shutting down or the system is going to sleep,
+                        // so we cannot keep the process alive indefinitely.
                         processmsg = false;
+                    } else if (!m_pGB && !m_pGB_preview) {
+                        waitdur = 500ULL;
+                        tckill = GetTickCount64() + waitdur;
+                        extendedwait = true;
+                        continue;
                     } else {
-                        if (!m_pGB && !m_pGB_preview) {
-                            waitdur = 500ULL;
-                            tckill = GetTickCount64() + waitdur;
-                            extendedwait = true;
-                            continue;
-                        }
+                        const int timeoutSecs = std::max(1, s.iGraphCloseTimeoutSec);
 
-                        CString timeoutmsg = L"Timeout when closing filter graph.\n\nClick YES to terminate player process. Click NO to wait longer (up to 15 seconds).";
-                        if (USE_LOGGER(s)) {
-                            PLAYER_LOG(_T("CMainFrame::CloseMedia - Timeout when closing filter graph"));
-                        }
-                        if (IDYES == AfxMessageBox(timeoutmsg, MB_ICONEXCLAMATION | MB_YESNO, 0)) {
+                        if (s.bGraphCloseShowDialog) {
+                            CString timeoutmsg = L"Timeout when closing filter graph.\n\nClick YES to terminate player process. Click NO to continue without terminating.";
+                            if (USE_LOGGER(s)) {
+                                PLAYER_LOG(_T("CMainFrame::CloseMedia - Timeout when closing filter graph (dialog auto-confirm %d s)"), timeoutSecs);
+                            }
+                            killprocess = ShowGraphCloseTimeoutDialog(m_hWnd, timeoutmsg, timeoutSecs) == IDYES;
                             processmsg = false;
-                        } else {
+                        } else if (!autoContinueGrace) {
+                            // Give the graph thread a last chance to finish before
+                            // proceeding without terminating the player.
+                            autoContinueGrace = true;
                             extendedwait = true;
-                            waitdur = 15000ULL;
+                            waitdur = static_cast<ULONGLONG>(timeoutSecs) * 1000ULL;
                             tckill = GetTickCount64() + waitdur;
+                            if (USE_LOGGER(s)) {
+                                PLAYER_LOG(_T("CMainFrame::CloseMedia - Timeout when closing filter graph (auto-continue in %d s)"), timeoutSecs);
+                            }
+                        } else {
+                            if (USE_LOGGER(s)) {
+                                PLAYER_LOG(_T("CMainFrame::CloseMedia - Timeout when closing filter graph (auto-continue, proceeding)"));
+                            }
+                            killprocess = false;
+                            processmsg = false;
                         }
                     }
                 }

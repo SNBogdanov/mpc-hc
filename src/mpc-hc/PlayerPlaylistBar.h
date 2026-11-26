@@ -208,7 +208,7 @@ public:
     void SavePlaylist(bool can_delay = false);
 
     bool SelectFileInPlaylist(LPCTSTR filename);
-    bool DeleteFileInPlaylist(POSITION pos, bool recycle = true);
+    bool DeleteFileInPlaylist(POSITION pos, bool recycle = true, bool silent = false, bool playNext = true);
     bool IsExternalPlayListActive(CStringW& playlistPath);
     void ClearExternalPlaylistIfInvalid();
 

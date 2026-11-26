@@ -1839,7 +1839,7 @@ bool CPlayerPlaylistBar::SelectFileInPlaylist(LPCTSTR filename)
     return false;
 }
 
-bool CPlayerPlaylistBar::DeleteFileInPlaylist(POSITION pos, bool recycle)
+bool CPlayerPlaylistBar::DeleteFileInPlaylist(POSITION pos, bool recycle, bool silent, bool playNext)
 {
     CAutoLock pledit(&m_plEditLock);
 
@@ -1847,7 +1847,7 @@ bool CPlayerPlaylistBar::DeleteFileInPlaylist(POSITION pos, bool recycle)
     CString filename = m_pl.GetAt(pos).m_fns.GetHead();
     bool candeletefile = false;
     bool folderPlayNext = false;
-    bool noconfirm = !s.bConfirmFileDelete;
+    bool noconfirm = silent || !s.bConfirmFileDelete;
     if (!PathUtils::IsURL(filename)) {
         if (!noconfirm && IsWindows10OrGreater()) {
             // show prompt, because Windows might not ask for confirmation
@@ -1871,8 +1871,9 @@ bool CPlayerPlaylistBar::DeleteFileInPlaylist(POSITION pos, bool recycle)
     }
 
     // Get position of next file
-    POSITION nextpos = pos;
-    if (isplaying) {
+    POSITION nextpos = nullptr;
+    if (isplaying && playNext) {
+        nextpos = pos;
         m_pl.GetNext(nextpos);
         if (nextpos == nullptr && m_pl.GetCount() > 1) {
             nextpos = m_pl.GetHeadPosition();
@@ -1904,11 +1905,14 @@ bool CPlayerPlaylistBar::DeleteFileInPlaylist(POSITION pos, bool recycle)
     }
 
     if (candeletefile) {
-        FileDelete(filename, m_pMainFrame->m_hWnd, true, noconfirm);
+        FileDelete(filename, m_pMainFrame->m_hWnd, recycle, noconfirm);
+        if (GetFileAttributesW(filename) == INVALID_FILE_ATTRIBUTES) {
+            m_pMainFrame->m_whisparrWatched.NotifyDeleted(filename);
+        }
     }
 
     // Continue with next file
-    if (isplaying) {
+    if (isplaying && playNext) {
         if (folderPlayNext) {
             m_pMainFrame->DoAfterPlaybackEvent();
         } else if (nextpos) {

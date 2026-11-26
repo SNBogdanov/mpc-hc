@@ -100,6 +100,8 @@ enum : UINT64 {
     CLSW_DVBSCAN = CLSW_THUMBNAILS << 1,
     CLSW_UNRECOGNIZEDSWITCH = CLSW_DVBSCAN << 1, // 48
     CLSW_EMBEDDING = CLSW_UNRECOGNIZEDSWITCH << 1, // started by COM to serve an Explorer verb, see ShellDropTarget.h
+    CLSW_DELETEWATCHED = CLSW_EMBEDDING << 1,
+    CLSW_DELETEWATCHED_PERMANENT = CLSW_DELETEWATCHED << 1,
 };
 
 enum MpcCaptionState {
@@ -627,8 +629,14 @@ public:
     CRect           rcLastWindowPos;
     bool            fRememberWindowSize;
     bool            fSavePnSZoom;
+    // Per-instance window slot (1..9), 0 = legacy single geometry. Selected with
+    // /windowpreset:N or a WindowPreset setting; each slot stores its own rect,
+    // window state, startup view preset and zoom.
+    int             iWindowPreset;
+    int             iWindowPresetCmd; // value from /windowpreset:N, 0 = not given
     double          dZoomX;
     double          dZoomY;
+    double          dSpeedRate;   // playback speed remembered in a window slot
 
     // Formats
     CMediaFormats   m_Formats;
@@ -735,6 +743,8 @@ public:
     bool            bPreventDisplaySleep;
     bool            bUseSMTC;
     int             iReloadAfterLongPause;
+    bool            bGraphCloseShowDialog;
+    int             iGraphCloseTimeoutSec;
     bool            bOpenRecPanelWhenOpeningDevice;
 
     enum class AfterPlayback {
@@ -1055,6 +1065,12 @@ public:
 
     bool bCaptureDeinterlace;
     bool bConfirmFileDelete;
+    bool bDeleteWatched;    // delete a file after it finishes playing
+    bool bConfirmDeleted;   // ask before that automatic delete
+    bool bDeleteWatchedSubs;    // also delete same-named subtitle files
+    bool bDeleteWatchedHistory; // drop the deleted file from recent files/history
+    bool bDeleteWatchedThumb;   // also delete same-named .jpg/.jpeg
+    bool bDeleteWatchedAudio;   // also delete same-named external audio files
     bool bShowVolumePercentage;
     // Portable mode: keep the MediaHistory INI and the saved playlist in
     // %APPDATA%\MPC-HC instead of the player folder (issue #2347 follow-up).

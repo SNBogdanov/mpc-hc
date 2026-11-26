@@ -4221,6 +4221,18 @@ BEGIN
                             "Show confirmation prompt before deleting file"
     IDS_PPAGEADVANCED_LIBASS_FOR_SRT
                             "Use libass (instead of standard renderer) for SRT subtitles. NOT recommended."
+    IDS_PPAGEADVANCED_DELETE_WATCHED
+                            "Delete the file after it finishes playing. Uses the recycle bin unless started with /delwatched:permanent."
+    IDS_PPAGEADVANCED_CONFIRM_DELETED
+                            "Ask before deleting a watched file automatically."
+    IDS_PPAGEADVANCED_DELETE_WATCHED_SUBS
+                            "Also delete subtitle files that share the file name."
+    IDS_PPAGEADVANCED_DELETE_WATCHED_HISTORY
+                            "Remove the deleted file from recent files and history."
+    IDS_PPAGEADVANCED_DELETE_WATCHED_THUMB
+                            "Also delete a same-named .jpg thumbnail/poster."
+    IDS_PPAGEADVANCED_DELETE_WATCHED_AUDIO
+                            "Also delete same-named external audio track files."
 END
 
 STRINGTABLE
@@ -4331,6 +4343,9 @@ BEGIN
     IDS_PPAGEADVANCED_GRP_HISTORY "History"
     IDS_PPAGEADVANCED_GRP_SCREENSHOTS "Screenshots"
     IDS_PPAGEADVANCED_GRP_MISC "Miscellaneous"
+    IDS_PPAGEADVANCED_GRP_WATCHED "Watched files"
+    IDS_PPAGEADVANCED_GRAPH_CLOSE_SHOW_DIALOG "Show a dialog when closing the filter graph times out. When disabled, the player continues automatically without terminating."
+    IDS_PPAGEADVANCED_GRAPH_CLOSE_TIMEOUT "Seconds before the graph close timeout dialog automatically chooses the safe option (continue without terminating the player)."
     IDS_REPLAYGAIN_MODE_OFF "Off"
     IDS_REPLAYGAIN_MODE_TRACK "Track"
     IDS_REPLAYGAIN_MODE_ALBUM "Album"

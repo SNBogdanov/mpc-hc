@@ -21,6 +21,11 @@
 
 #pragma once
 
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+
 #include "ChildView.h"
 #include "DVBChannel.h"
 #include "DebugShadersDlg.h"
@@ -42,6 +47,7 @@
 #include "PlayerToolBar.h"
 #include "SubtitleDlDlg.h"
 #include "TimerWrappers.h"
+#include "WhisparrWatched.h"
 #include "OSD.h"
 #include "CMPCThemeMenu.h"
 #include "../SubPic/MemSubPic.h"
@@ -291,6 +297,20 @@ private:
     CComPtr<IVMRWindowlessControl9> m_pVMR9C_preview;
     CComPtr<IMFVideoProcessor>      m_pMFVP_preview;
     CComPtr<ISubPicAllocatorPresenter2> m_pCAP2_preview;
+
+    // Asynchronous seekbar-preview seeker. The UI thread only publishes the
+    // latest target position, so a stalled decoder or GPU cannot freeze the UI.
+    struct PreviewSeekState {
+        std::mutex mutex;
+        std::condition_variable cv;
+        REFERENCE_TIME target = 0;
+        bool pending = false;
+        bool stop = false;
+        CComQIPtr<IMediaSeeking> pMS;
+    };
+    std::shared_ptr<PreviewSeekState> m_previewSeekState;
+    std::thread m_previewSeekThread;
+
     int defaultVideoAngle;
     //
     CComPtr<IVMRMixerControl9> m_pVMRMC;
@@ -394,6 +414,13 @@ private:
     bool m_bDelaySetOutputRect;
 
     CRect m_lastWindowRect;
+
+    // Placement captured before a minimize/hide. While the monitors are off,
+    // Windows can clamp the minimized window to the primary monitor; this lets
+    // us put it back on the monitor it was hidden on.
+    WINDOWPLACEMENT m_hiddenWindowPlacement = {};
+    CRect m_hiddenWindowRect;
+    bool m_bRestoreHiddenWindowPlacement = false;
 
     void SetDefaultWindowRect(int iMonitor = 0);
     void SetDefaultFullscreenState();
@@ -674,6 +701,7 @@ public:
 protected:
     bool m_bUseSeekPreview;
     bool m_bFirstPlay;
+    bool m_bSpeedOsdDone; // the startup speed OSD is shown only for the first file
     bool m_bOpeningInAutochangedMonitorMode;
     bool m_bPausedForAutochangeMonitorMode;
     bool restoringWindowRect;
@@ -1050,7 +1078,9 @@ public:
     afx_msg LRESULT OnFilePostOpenmedia(WPARAM wParam, LPARAM lparam);
     afx_msg LRESULT OnOpenMediaFailed(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnRunDeferredActions(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnHelpPromptAddr(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnFileReadyProbe(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnFileDeleteWatched(WPARAM wParam, LPARAM lParam);
 
     // Only reached in headless scan mode: with the dialog running these go to
     // it instead, because DoTunerScan sends to the HWND it was handed.
@@ -1368,6 +1398,7 @@ public:
     CMouseWndWithArtView*  m_pVideoWnd;            // Current Video (main display screen or 2nd)
     CWnd*                  m_pOSDWnd;
     CPreView               m_wndPreView;           // SeekPreview
+    CWhisparrWatched       m_whisparrWatched;
 
 
     void ReleasePreviewGraph();
@@ -1377,6 +1408,13 @@ public:
     HRESULT HandleMultipleEntryRar(CStringW fn, int* pEntryIndex = nullptr);
     bool TrySkipWithinRar(bool forward);
     bool CanPreviewUse();
+
+    void StartPreviewSeekThread();
+    void StopPreviewSeekThread();
+    void RequestPreviewSeek(REFERENCE_TIME rt);
+    static void PreviewSeekLoop(std::shared_ptr<PreviewSeekState> state);
+    void SetPreviewSeekGraph();
+    void ClearPreviewSeekGraph();
 
     CFullscreenWnd* m_pDedicatedFSVideoWnd;
     COSD        m_OSD;

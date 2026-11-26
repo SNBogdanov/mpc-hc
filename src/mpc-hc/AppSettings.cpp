@@ -87,8 +87,11 @@ CAppSettings::CAppSettings()
     , fRememberWindowSize(false)
     , rcLastWindowPos(CRect(100, 100, 500, 400))
     , fSavePnSZoom(false)
+    , iWindowPreset(0)
+    , iWindowPresetCmd(0)
     , dZoomX(1.0)
     , dZoomY(1.0)
+    , dSpeedRate(1.0)
     , fAssociatedWithIcons(true)
     , hAccel(nullptr)
     , fWinLirc(false)
@@ -290,6 +293,8 @@ CAppSettings::CAppSettings()
     , bPreventDisplaySleep(true)
     , bUseSMTC(false)
     , iReloadAfterLongPause(0)
+    , bGraphCloseShowDialog(true)
+    , iGraphCloseTimeoutSec(15)
     , bOpenRecPanelWhenOpeningDevice(true)
     , lastQuickOpenPath(L"")
     , lastFileSaveCopyPath(L"")
@@ -305,6 +310,12 @@ CAppSettings::CAppSettings()
     , bCaptureDeinterlace(false)
     , bPauseWhileDraggingSeekbar(true)
     , bConfirmFileDelete(true)
+    , bDeleteWatched(false)
+    , bConfirmDeleted(true)
+    , bDeleteWatchedSubs(false)
+    , bDeleteWatchedHistory(true)
+    , bDeleteWatchedThumb(false)
+    , bDeleteWatchedAudio(false)
     , bShowVolumePercentage(true)
     , bHistoryInAppData(false)
     , LastGPUCheck(0)
@@ -1008,6 +1019,20 @@ void CAppSettings::SaveSettings(bool write_full_history /* = false */)
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_LASTWINDOWTYPE, nLastWindowType);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_LASTFULLSCREEN, fLastFullScreen);
 
+    // Save this instance's window slot, if one is selected. Each slot keeps its
+    // own rect, window state, view preset and zoom, so several instances do not
+    // overwrite each other's geometry.
+    if (iWindowPreset >= 1 && iWindowPreset <= 9) {
+        CString key;
+        key.Format(_T("%s%d"), IDS_RS_WINDOW_PRESET, iWindowPreset);
+        CString str;
+        str.Format(_T("%ld,%ld,%ld,%ld,%u,%d,%d,%d,%d,%.4f,%.4f,%.4f"),
+                   rcLastWindowPos.left, rcLastWindowPos.top, rcLastWindowPos.right, rcLastWindowPos.bottom,
+                   nLastWindowType, nStartupPreset, nCustomPresetControlState, nCustomPresetCaption,
+                   iZoomLevel, dZoomX, dZoomY, dSpeedRate);
+        pApp->WriteProfileString(IDS_R_SETTINGS, key, str);
+    }
+
     if (fSavePnSZoom) {
         CString str;
         str.Format(_T("%.3f,%.3f"), dZoomX, dZoomY);
@@ -1359,6 +1384,8 @@ void CAppSettings::SaveSettings(bool write_full_history /* = false */)
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_PREVENT_DISPLAY_SLEEP, bPreventDisplaySleep);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_USE_SMTC, bUseSMTC);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_RELOAD_AFTER_LONG_PAUSE, iReloadAfterLongPause);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_GRAPH_CLOSE_SHOW_DIALOG, bGraphCloseShowDialog);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_GRAPH_CLOSE_TIMEOUT, iGraphCloseTimeoutSec);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_OPEN_REC_PANEL_WHEN_OPENING_DEVICE, bOpenRecPanelWhenOpeningDevice);
 
     {
@@ -1418,6 +1445,12 @@ void CAppSettings::SaveSettings(bool write_full_history /* = false */)
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_CAPTURE_DEINTERLACE, bCaptureDeinterlace);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_PAUSE_WHILE_DRAGGING_SEEKBAR, bPauseWhileDraggingSeekbar);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_CONFIRM_FILE_DELETE, bConfirmFileDelete);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED, bDeleteWatched);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_CONFIRM_DELETED, bConfirmDeleted);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_SUBS, bDeleteWatchedSubs);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_HISTORY, bDeleteWatchedHistory);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_THUMB, bDeleteWatchedThumb);
+    pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_AUDIO, bDeleteWatchedAudio);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_SHOW_VOLUME_PERCENTAGE, bShowVolumePercentage);
     pApp->WriteProfileInt(IDS_R_SETTINGS, IDS_RS_HISTORY_IN_APPDATA, bHistoryInAppData);
     pApp->SetHistoryInAppData(bHistoryInAppData); // keep the app's cached copy in sync
@@ -1880,6 +1913,64 @@ void CAppSettings::LoadSettings()
     nLastWindowType = pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_LASTWINDOWTYPE, SIZE_RESTORED);
     fLastFullScreen = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_LASTFULLSCREEN, FALSE);
 
+    // Per-instance window slot. The command line wins over the WindowPreset
+    // setting; when a slot is selected, its saved geometry, window state, view
+    // preset and zoom replace the single-instance values read above.
+    iWindowPreset = pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_WINDOW_PRESET, 0);
+    if (iWindowPresetCmd >= 1 && iWindowPresetCmd <= 9) {
+        iWindowPreset = iWindowPresetCmd;
+    }
+    if (iWindowPreset >= 1 && iWindowPreset <= 9) {
+        // A selected slot always restores its own geometry, so the remember
+        // toggles are implied while a slot is in use.
+        fRememberWindowPos = true;
+        fRememberWindowSize = true;
+        CString key;
+        key.Format(_T("%s%d"), IDS_RS_WINDOW_PRESET, iWindowPreset);
+        CString str = pApp->GetProfileString(IDS_R_SETTINGS, key, _T(""));
+        long l = 0, t = 0, r = 0, b = 0;
+        unsigned wt = SIZE_RESTORED;
+        int sp = -1, ccs = -1, cc = -1, zl = -100;
+        double zx = 1.0, zy = 1.0, spd = 1.0;
+        const int parsed = _stscanf_s(str, _T("%ld,%ld,%ld,%ld,%u,%d,%d,%d,%d,%lf,%lf,%lf"),
+                                      &l, &t, &r, &b, &wt, &sp, &ccs, &cc, &zl, &zx, &zy, &spd);
+        if (parsed >= 9) {
+            CRect rc(l, t, r, b);
+            if (rc.Width() >= 250 && rc.Height() >= 80) {
+                rcLastWindowPos = rc;
+            }
+            if (wt == SIZE_RESTORED || wt == SIZE_MAXIMIZED || wt == SIZE_MINIMIZED) {
+                nLastWindowType = wt;
+            }
+            if (sp >= 0 && sp < STARTUP_PRESET_COUNT) {
+                nStartupPreset = sp;
+            }
+            if (ccs >= 0) {
+                nCustomPresetControlState = ccs & (CS_SEEKBAR | CS_TOOLBAR | CS_INFOBAR | CS_STATSBAR | CS_STATUSBAR);
+            }
+            if (cc >= 0 && cc < MODE_COUNT) {
+                nCustomPresetCaption = cc;
+            }
+            if (zl >= -1 && zl <= 3) {
+                iZoomLevel = zl;
+            }
+            if (parsed >= 11) {
+                if (zx >= 0.196 && zx <= 5.0) {
+                    dZoomX = zx;
+                }
+                if (zy >= 0.196 && zy <= 5.0) {
+                    dZoomY = zy;
+                }
+            }
+            if (parsed >= 12) {
+                const double a = spd < 0 ? -spd : spd;
+                if (a >= 0.05 && a <= 16.0) {
+                    dSpeedRate = spd;
+                }
+            }
+        }
+    }
+
     bShufflePlaylistItems = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_SHUFFLEPLAYLISTITEMS, FALSE);
     bRememberPlaylistItems = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_REMEMBERPLAYLISTITEMS, TRUE);
     bHidePlaylistFullScreen = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_HIDEPLAYLISTFULLSCREEN, FALSE);
@@ -1903,6 +1994,12 @@ void CAppSettings::LoadSettings()
     bCaptureDeinterlace = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_CAPTURE_DEINTERLACE, FALSE);
     bPauseWhileDraggingSeekbar = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_PAUSE_WHILE_DRAGGING_SEEKBAR, TRUE);
     bConfirmFileDelete = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_CONFIRM_FILE_DELETE, TRUE);
+    bDeleteWatched = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED, FALSE);
+    bConfirmDeleted = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_CONFIRM_DELETED, TRUE);
+    bDeleteWatchedSubs = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_SUBS, FALSE);
+    bDeleteWatchedHistory = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_HISTORY, TRUE);
+    bDeleteWatchedThumb = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_THUMB, FALSE);
+    bDeleteWatchedAudio = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_DELETE_WATCHED_AUDIO, FALSE);
     bShowVolumePercentage = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_SHOW_VOLUME_PERCENTAGE, TRUE);
     bHistoryInAppData = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_HISTORY_IN_APPDATA, FALSE);
     AfxGetMyApp()->SetHistoryInAppData(bHistoryInAppData);
@@ -2349,6 +2446,8 @@ void CAppSettings::LoadSettings()
     bPreventDisplaySleep = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_PREVENT_DISPLAY_SLEEP, TRUE);
     bUseSMTC = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_USE_SMTC, FALSE);
     iReloadAfterLongPause = pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_RELOAD_AFTER_LONG_PAUSE, 0);
+    bGraphCloseShowDialog = !!pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_GRAPH_CLOSE_SHOW_DIALOG, TRUE);
+    iGraphCloseTimeoutSec = pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_GRAPH_CLOSE_TIMEOUT, 15);
     bOpenRecPanelWhenOpeningDevice = pApp->GetProfileInt(IDS_R_SETTINGS, IDS_RS_OPEN_REC_PANEL_WHEN_OPENING_DEVICE, TRUE);
 
     sanear->SetOutputDevice(pApp->GetProfileString(IDS_R_SANEAR, IDS_RS_SANEAR_DEVICE_ID),
@@ -2777,9 +2876,18 @@ void CAppSettings::ParseCommandLine(CAtlList<CString>& cmdln)
                 nCLSwitches |= CLSW_DEVICE;
             } else if (sw == _T("add")) {
                 nCLSwitches |= CLSW_ADD;
-            } else if (sw == _T("randomize")) {
-                nCLSwitches |= CLSW_RANDOMIZE;
-            } else if (sw == _T("volume") && pos) {
+        } else if (sw == _T("randomize")) {
+            nCLSwitches |= CLSW_RANDOMIZE;
+        } else if (sw == _T("delwatched")) {
+            nCLSwitches |= CLSW_DELETEWATCHED;
+        } else if (sw == _T("delwatched:permanent")) {
+            nCLSwitches |= CLSW_DELETEWATCHED | CLSW_DELETEWATCHED_PERMANENT;
+        } else if (sw.Left(13) == _T("windowpreset:")) {
+            const int n = _ttoi(sw.Mid(13));
+            if (n >= 1 && n <= 9) {
+                iWindowPresetCmd = n;
+            }
+        } else if (sw == _T("volume") && pos) {
                 int setVolumeVal = _ttoi(cmdln.GetNext(pos));
                 if (setVolumeVal >= 0 && setVolumeVal <= 100) {
                     nCmdVolume = setVolumeVal;
